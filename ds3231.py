@@ -29,262 +29,333 @@
 
 from micropython import const
 
-DATETIME_REG    = const(0) # 7 bytes
-ALARM1_REG      = const(7) # 5 bytes
-ALARM2_REG      = const(11) # 4 bytes
-CONTROL_REG     = const(14)
-STATUS_REG      = const(15)
-AGING_REG       = const(16)
-TEMPERATURE_REG = const(17) # 2 bytes
+# -------------------------------------------------------------------------------
+# Register address constants (using const for memory efficiency in MicroPython)
+# -------------------------------------------------------------------------------
+DATETIME_REG    = const(0)  # Starting register for time/date data (7 bytes total)
+ALARM1_REG      = const(7)  # Starting register for Alarm 1 settings (5 bytes total)
+ALARM2_REG      = const(11) # Starting register for Alarm 2 settings (4 bytes total)
+CONTROL_REG     = const(14) # Control register for square‑wave, interrupts, etc.
+STATUS_REG      = const(15) # Status register for flags (e.g., OSF, busy)
+AGING_REG       = const(16) # Aging offset register (tuning TCXO frequency)
+TEMPERATURE_REG = const(17) # Temperature register (2 bytes: MSB, LSB)
 
-
+# ------------------------------------------------------------------------------
+# Helper functions to convert between decimal and Binary Coded Decimal (BCD)
+# ------------------------------------------------------------------------------
 def dectobcd(decimal):
-    """Convert decimal to binary coded decimal (BCD) format"""
-    return (decimal // 10) << 4 | (decimal % 10)
+    """Convert a base‑10 integer (0–99) into BCD format (0x00–0x99).
+    
+    BCD packs two decimal digits into one byte: high nibble = tens, low nibble = ones.
+    Example: 45 → (4 << 4) | 5 = 0x45.
+    """
+    tens = decimal // 10            # extract tens digit
+    ones = decimal % 10             # extract ones digit
+    return (tens << 4) | ones       # combine into one BCD byte
 
 def bcdtodec(bcd):
-    """Convert binary coded decimal to decimal"""
-    return ((bcd >> 4) * 10) + (bcd & 0x0F)
+    """Convert a BCD‑encoded byte into a base‑10 integer.
+    
+    BCD format: high nibble = tens, low nibble = ones.
+    Example: 0x37 → (3 * 10) + 7 = 37.
+    """
+    tens = (bcd >> 4) & 0x0F        # high nibble
+    ones = bcd & 0x0F               # low nibble
+    return tens * 10 + ones         # compute decimal value
 
-
+# ------------------------------------------------------------------------------
+# Main DS3231 driver class
+# ------------------------------------------------------------------------------
 class DS3231:
-    """ DS3231 RTC driver.
+    """MicroPython driver for the DS3231 Real‑Time Clock (RTC) chip.
+    
+    - Works only for years 2000–2099 (two‑digit year storage).
+    - Provides time/date read/write, square wave output, alarms, and status flags.
+    """
+    # --------------------------------------------------------------------------
+    # Square‑wave output frequency options (for control register)
+    # --------------------------------------------------------------------------
+    FREQ_1      = const(1)    # 1 Hz output
+    FREQ_1024   = const(2)    # 1.024 kHz output
+    FREQ_4096   = const(3)    # 4.096 kHz output
+    FREQ_8192   = const(4)    # 8.192 kHz output
+    SQW_32K     = const(1)    # Option to output 32 kHz on the SQW pin
 
-    Hard coded to work with year 2000-2099."""
-    FREQ_1      = const(1)
-    FREQ_1024   = const(2)
-    FREQ_4096   = const(3)
-    FREQ_8192   = const(4)
-    SQW_32K     = const(1)
+    # --------------------------------------------------------------------------
+    # Alarm 1 “match” modes (bit masks for register flags)
+    # --------------------------------------------------------------------------
+    AL1_EVERY_S     = const(15)  # Trigger every second
+    AL1_MATCH_S     = const(14)  # Trigger when seconds match (once per minute)
+    AL1_MATCH_MS    = const(12)  # Trigger when minutes & seconds match (once per hour)
+    AL1_MATCH_HMS   = const(8)   # Trigger when hours, minutes & seconds match (once per day)
+    AL1_MATCH_DHMS  = const(0)   # Trigger when date|weekday, hour, min, sec match
 
-    AL1_EVERY_S     = const(15) # Alarm every second
-    AL1_MATCH_S     = const(14) # Alarm when seconds match (every minute)
-    AL1_MATCH_MS    = const(12) # Alarm when minutes, seconds match (every hour)
-    AL1_MATCH_HMS   = const(8) # Alarm when hours, minutes, seconds match (every day)
-    AL1_MATCH_DHMS  = const(0) # Alarm when day|wday, hour, min, sec match (specific wday / mday) (once per month/week)
-
-    AL2_EVERY_M     = const(7) # Alarm every minute on 00 seconds
-    AL2_MATCH_M     = const(6) # Alarm when minutes match (every hour)
-    AL2_MATCH_HM    = const(4) # Alarm when hours and minutes match (every day)
-    AL2_MATCH_DHM   = const(0) # Alarm when day|wday match (once per month/week)
+    # --------------------------------------------------------------------------
+    # Alarm 2 “match” modes (bit masks for register flags)
+    # --------------------------------------------------------------------------
+    AL2_EVERY_M     = const(7)  # Trigger every minute at second 00
+    AL2_MATCH_M     = const(6)  # Trigger when minutes match (once per hour)
+    AL2_MATCH_HM    = const(4)  # Trigger when hours & minutes match (once per day)
+    AL2_MATCH_DHM   = const(0)  # Trigger when date|weekday match
 
     def __init__(self, i2c, addr=0x68):
+        """Initialize with an I2C bus object and the RTC’s I2C address (default 0x68)."""
         self.i2c = i2c
         self.addr = addr
-        self._timebuf = bytearray(7) # Pre-allocate a buffer for the time data
-        self._buf = bytearray(1) # Pre-allocate a single bytearray for re-use
-        self._al1_buf = bytearray(4)
-        self._al2buf = bytearray(3)
+        # Pre‑allocate reusable buffers to minimize memory churn on reads/writes:
+        self._timebuf  = bytearray(7)  # buffer for reading/writing 7 time registers
+        self._buf      = bytearray(1)  # single‑byte buffer for control/status ops
+        self._al1_buf  = bytearray(4)  # buffer for the first 4 bytes of Alarm 1
+        self._al2buf   = bytearray(3)  # buffer for all bytes of Alarm 2
 
     def datetime(self, datetime=None):
-        """Get or set datetime
-
-        Always sets or returns in 24h format, converts to 24h if clock is set to 12h format
-        datetime : tuple, (0-year, 1-month, 2-day, 3-hour, 4-minutes[, 5-seconds[, 6-weekday]])"""
+        """Get or set the RTC’s date/time.
+        
+        Without argument: reads 7 bytes starting at DATETIME_REG,
+        decodes BCD to (year, month, day, weekday, hour, minute, second).
+        
+        With tuple argument: writes new date/time, resets Oscillator Stop Flag.
+        Tuple format: (year, month, day, hour, minute, second, weekday)
+        - Seconds and weekday are optional on set; missing fields default to 0.
+        - Always uses 24‑hour format on return.
+        """
         if datetime is None:
+            # ----------------------------
+            # Read current time from chip
+            # ----------------------------
             self.i2c.readfrom_mem_into(self.addr, DATETIME_REG, self._timebuf)
-            # 0x00 - Seconds    BCD
-            # 0x01 - Minutes    BCD
-            # 0x02 - Hour       0 12/24 AM/PM/20s BCD
-            # 0x03 - WDay 1-7   0000 0 BCD
-            # 0x04 - Day 1-31   00 BCD
-            # 0x05 - Month 1-12 Century 00 BCD
-            # 0x06 - Year 0-99  BCD (2000-2099)
+            # Byte layout in self._timebuf:
+            # [0] = seconds (BCD)
+            # [1] = minutes (BCD)
+            # [2] = hour register (BCD + 12/24 & AM/PM bits)
+            # [3] = weekday (BCD, 1–7)
+            # [4] = day of month (BCD)
+            # [5] = month (BCD + century flag in bit 7)
+            # [6] = year (BCD, 00–99 → 2000–2099)
+
+            # Convert each BCD field to decimal:
             seconds = bcdtodec(self._timebuf[0])
             minutes = bcdtodec(self._timebuf[1])
 
-            if (self._timebuf[2] & 0x40) >> 6: # Check for 12 hour mode bit
-                hour = bcdtodec(self._timebuf[2] & 0x9f) # Mask out bit 6(12/24) and 5(AM/PM)
-                if (self._timebuf[2] & 0x20) >> 5: # bit 5(AM/PM)
-                    # PM
+            # Hour decoding: test bit 6 → 12/24h mode
+            hr_reg = self._timebuf[2]
+            if (hr_reg & 0x40):  # if bit 6 set → 12‑h mode
+                # mask out format bits to get BCD hour, then add 12 if PM bit (5) set
+                hour = bcdtodec(hr_reg & 0x1F)
+                if (hr_reg & 0x20):  # PM indicator
                     hour += 12
             else:
-                # 24h mode
-                hour = bcdtodec(self._timebuf[2] & 0xbf) # Mask bit 6 (12/24 format)
+                # 24‑h mode: mask out only bit 6, decode BCD
+                hour = bcdtodec(hr_reg & 0x3F)
 
-            weekday = bcdtodec(self._timebuf[3]) # Can be set arbitrarily by user (1,7)
-            day = bcdtodec(self._timebuf[4])
-            month = bcdtodec(self._timebuf[5] & 0x7f) # Mask out the century bit
-            year = bcdtodec(self._timebuf[6]) + 2000
+            weekday = bcdtodec(self._timebuf[3])
+            day     = bcdtodec(self._timebuf[4])
+            month   = bcdtodec(self._timebuf[5] & 0x7F)  # mask out century bit
+            year    = bcdtodec(self._timebuf[6]) + 2000    # base 2000
 
+            # Warn if oscillator was stopped (power loss)
             if self.OSF():
                 print("WARNING: Oscillator stop flag set. Time may not be accurate.")
 
-            return (year, month, day, weekday, hour, minutes, seconds, 0) # Conforms to the ESP8266 RTC (v1.13)
+            # Return full tuple plus dummy subseconds (0) to match ESP8266 RTC API
+            return (year, month, day, weekday, hour, minutes, seconds, 0)
 
-        # Set the clock
+        # ----------------------------
+        # Set new date/time on chip
+        # ----------------------------
+        # Day of week (optional)
         try:
-            self._timebuf[3] = dectobcd(datetime[6]) # Day of week
+            self._timebuf[3] = dectobcd(datetime[6])
         except IndexError:
             self._timebuf[3] = 0
+
+        # Seconds (optional)
         try:
-            self._timebuf[0] = dectobcd(datetime[5]) # Seconds
+            self._timebuf[0] = dectobcd(datetime[5])
         except IndexError:
             self._timebuf[0] = 0
-        self._timebuf[1] = dectobcd(datetime[4]) # Minutes
-        self._timebuf[2] = dectobcd(datetime[3]) # Hour + the 24h format flag
-        self._timebuf[4] = dectobcd(datetime[2]) # Day
-        self._timebuf[5] = dectobcd(datetime[1]) & 0xff # Month + mask the century flag
-        self._timebuf[6] = dectobcd(int(str(datetime[0])[-2:])) # Year can be yyyy, or yy
+
+        # Minutes, hours, day, month, year (required)
+        self._timebuf[1] = dectobcd(datetime[4])                     # Minutes
+        self._timebuf[2] = dectobcd(datetime[3])                     # Hours, assumes 24‑h format
+        self._timebuf[4] = dectobcd(datetime[2])                     # Day
+        self._timebuf[5] = dectobcd(datetime[1]) & 0xFF              # Month, ignore century bit
+        # Year: allow full YYYY or YY; take last two digits
+        self._timebuf[6] = dectobcd(int(str(datetime[0])[-2:]))
+
+        # Write all 7 bytes in one I²C transaction for accuracy
         self.i2c.writeto_mem(self.addr, DATETIME_REG, self._timebuf)
+        # Clear any Oscillator Stop Flag now that time is freshly set
         self._OSF_reset()
         return True
 
     def square_wave(self, freq=None):
-        """Outputs Square Wave Signal
-
-        The alarm interrupts are disabled when enabling a square wave output. Disabling SWQ out does
-        not enable the alarm interrupts. Set them manually with the alarm_int() method.
-        freq : int,
-            Not given: returns current setting
-            False = disable SQW output,
-            1 =     1 Hz,
-            2 = 1.024 kHz,
-            3 = 4.096 kHz,
-            4 = 8.192 kHz"""
+        """Enable/read square‑wave output on SQW pin.
+        
+        - No argument: returns current CONTROL_REG value (which encodes freq).
+        - freq=False: disable SQW (forces INTCN=1, ALIE1&2=0).
+        - freq=1–4: enable 1 Hz, 1.024 kHz, 4.096 kHz, or 8.192 kHz output.
+        """
         if freq is None:
+            # Read one byte from CONTROL_REG
             return self.i2c.readfrom_mem(self.addr, CONTROL_REG, 1)[0]
 
+        # Read current control byte into buffer
+        self.i2c.readfrom_mem_into(self.addr, CONTROL_REG, self._buf)
+        ctrl = self._buf[0]
         if not freq:
-            # Set INTCN (bit 2) to 1 and both ALIE (bits 1 & 0) to 0
-            self.i2c.readfrom_mem_into(self.addr, CONTROL_REG, self._buf)
-            self.i2c.writeto_mem(self.addr, CONTROL_REG, bytearray([(self._buf[0] & 0xf8) | 0x04]))
+            # Disable SQW: set INTCN bit=1 (mask lower 3 bits → preserve top 5) then OR 0x04
+            new = (ctrl & 0xF8) | 0x04
         else:
-            # Set the frequency in the control reg and at the same time set the INTCN to 0
-            freq -= 1
-            self.i2c.readfrom_mem_into(self.addr, CONTROL_REG, self._buf)
-            self.i2c.writeto_mem(self.addr, CONTROL_REG, bytearray([(self._buf[0] & 0xe3) | (freq << 3)]))
+            # Enable SQW: clear INTCN=0 (mask bits 3–5), then OR desired freq<<3
+            new = (ctrl & 0xE3) | ((freq - 1) << 3)
+        # Write updated control byte
+        self.i2c.writeto_mem(self.addr, CONTROL_REG, bytearray([new]))
         return True
 
     def alarm1(self, time=None, match=AL1_MATCH_DHMS, int_en=True, weekday=False):
-        """Set alarm1, can match mday, wday, hour, minute, second
-
-        time    : tuple, (second,[ minute[, hour[, day]]])
-        weekday : bool, select mday (False) or wday (True)
-        match   : int, match const
-        int_en  : bool, enable interrupt on alarm match on SQW/INT pin (disables SQW output)"""
+        """Configure or read Alarm 1.
+        
+        - No argument: returns raw 4‑byte register contents.
+        - time: tuple specifying second, minute, hour, day/date (partial tuples allowed).
+        - match: one of AL1_* constants to choose which bytes are “don’t care.”
+        - weekday: if True, day field uses weekday instead of date.
+        - int_en: enable interrupt on match (asserts on SQW/INT pin).
+        """
         if time is None:
-            # TODO Return readable string
             self.i2c.readfrom_mem_into(self.addr, ALARM1_REG, self._al1_buf)
             return self._al1_buf
 
+        # Allow passing single integer → treat as (second,)
         if isinstance(time, int):
             time = (time,)
 
-        a1m4 = (match & 0x08) << 4
-        a1m3 = (match & 0x04) << 5
-        a1m2 = (match & 0x02) << 6
-        a1m1 = (match & 0x01) << 7
+        # Build A1Mx mask bits at correct register bit positions:
+        a1m1 = (match & 0x01) << 7  # second match mask
+        a1m2 = (match & 0x02) << 6  # minute mask
+        a1m3 = (match & 0x04) << 5  # hour mask
+        a1m4 = (match & 0x08) << 4  # day/date mask
+        # DY/DT bit: 1 = weekday, 0 = date
+        dydt = (1 << 6) if weekday else 0
 
-        dydt = (1 << 6) if weekday else 0 # day / date bit
+        # Populate each alarm byte: data BCD OR mask bit (or DY/DT where applicable)
+        self._al1_buf[0] = dectobcd(time[0]) | a1m1
+        self._al1_buf[1] = (dectobcd(time[1]) | a1m2) if len(time) > 1 else a1m2
+        self._al1_buf[2] = (dectobcd(time[2]) | a1m3) if len(time) > 2 else a1m3
+        self._al1_buf[3] = (dectobcd(time[3]) | a1m4 | dydt) if len(time) > 3 else (a1m4 | dydt)
 
-        self._al1_buf[0] = dectobcd(time[0]) | a1m1 # second
-        self._al1_buf[1] = (dectobcd(time[1]) | a1m2) if len(time) > 1 else a1m2 # minute
-        self._al1_buf[2] = (dectobcd(time[2]) | a1m3) if len(time) > 2 else a1m3 # hour
-        self._al1_buf[3] = (dectobcd(time[3]) | a1m4 | dydt) if len(time) > 3 else a1m4 | dydt # day (wday|mday)
-
+        # Write the 4‑byte alarm configuration
         self.i2c.writeto_mem(self.addr, ALARM1_REG, self._al1_buf)
-
-        # Set the interrupt bit
+        # Enable/disable interrupt bits in control register
         self.alarm_int(enable=int_en, alarm=1)
-
-        # Check the alarm (will reset the alarm flag)
+        # Clear any pre‑existing Alarm 1 flag
         self.check_alarm(1)
-
         return self._al1_buf
 
     def alarm2(self, time=None, match=AL2_MATCH_DHM, int_en=True, weekday=False):
-        """Get/set alarm 2 (can match minute, hour, day)
-
-        time    : tuple, (minute[, hour[, day]])
-        weekday : bool, select mday (False) or wday (True)
-        match   : int, match const
-        int_en  : bool, enable interrupt on alarm match on SQW/INT pin (disables SQW output)
-        Returns : bytearray(3), the alarm settings register"""
+        """Configure or read Alarm 2 (similar to Alarm 1 but without seconds).
+        
+        - time: tuple specifying minute, hour, day/date (partial tuples allowed).
+        - match, weekday, int_en: same semantics as alarm1().
+        """
         if time is None:
-            # TODO Return readable string
             self.i2c.readfrom_mem_into(self.addr, ALARM2_REG, self._al2buf)
             return self._al2buf
 
         if isinstance(time, int):
             time = (time,)
 
-        a2m4 = (match & 0x04) << 5 # masks
-        a2m3 = (match & 0x02) << 6
-        a2m2 = (match & 0x01) << 7
+        # Build A2Mx mask bits
+        a2m2 = (match & 0x01) << 7  # minute mask
+        a2m3 = (match & 0x02) << 6  # hour mask
+        a2m4 = (match & 0x04) << 5  # day/date mask
+        dydt = (1 << 6) if weekday else 0
 
-        dydt = (1 << 6) if weekday else 0 # day / date bit
+        # Populate alarm bytes
+        self._al2buf[0] = (dectobcd(time[0]) | a2m2) if len(time) > 0 else a2m2
+        self._al2buf[1] = (dectobcd(time[1]) | a2m3) if len(time) > 1 else a2m3
+        self._al2buf[2] = (dectobcd(time[2]) | a2m4 | dydt) if len(time) > 2 else (a2m4 | dydt)
 
-        self._al2buf[0] = dectobcd(time[0]) | a2m2 if len(time) > 1 else a2m2 # minute
-        self._al2buf[1] = dectobcd(time[1]) | a2m3 if len(time) > 2 else a2m3 # hour
-        self._al2buf[2] = dectobcd(time[2]) | a2m4 | dydt if len(time) > 3 else a2m4 | dydt # day
-
+        # Write Alarm 2 registers
         self.i2c.writeto_mem(self.addr, ALARM2_REG, self._al2buf)
-
-        # Set the interrupt bits
+        # Enable interrupt if requested
         self.alarm_int(enable=int_en, alarm=2)
-
-        # Check the alarm (will reset the alarm flag)
+        # Clear any pending Alarm 2 flag
         self.check_alarm(2)
-
         return self._al2buf
 
     def alarm_int(self, enable=True, alarm=0):
-        """Enable/disable interrupt for alarm1, alarm2 or both.
-
-        Enabling the interrupts disables the SQW output
-        enable : bool, enable/disable interrupts
-        alarm : int, alarm nr (0 to set both interrupts)
-        returns: the control register"""
+        """Enable/disable interrupt flags for Alarm 1, Alarm 2, or both.
+        
+        - alarm=1: Alarm 1 only
+        - alarm=2: Alarm 2 only
+        - alarm=0: both alarms
+        - enable=True/False toggles interrupt enable bits (AL1IE, AL2IE).
+        """
+        # For Alarm 1
         if alarm in (0, 1):
             self.i2c.readfrom_mem_into(self.addr, CONTROL_REG, self._buf)
+            ctrl = self._buf[0]
             if enable:
-                self.i2c.writeto_mem(self.addr, CONTROL_REG, bytearray([(self._buf[0] & 0xfa) | 0x05]))
+                # Set A1IE (bit1) and leave INTCN=0 to route interrupt to SQW/INT pin
+                new = (ctrl & 0xFA) | 0x05
             else:
-                self.i2c.writeto_mem(self.addr, CONTROL_REG, bytearray([self._buf[0] & 0xfe]))
+                # Clear A1IE (bit1)
+                new = ctrl & 0xFD
+            self.i2c.writeto_mem(self.addr, CONTROL_REG, bytearray([new]))
 
+        # For Alarm 2
         if alarm in (0, 2):
             self.i2c.readfrom_mem_into(self.addr, CONTROL_REG, self._buf)
+            ctrl = self._buf[0]
             if enable:
-                self.i2c.writeto_mem(self.addr, CONTROL_REG, bytearray([(self._buf[0] & 0xf9) | 0x06]))
+                # Set A2IE (bit2)
+                new = (ctrl & 0xF9) | 0x06
             else:
-                self.i2c.writeto_mem(self.addr, CONTROL_REG, bytearray([self._buf[0] & 0xfd]))
+                # Clear A2IE (bit2)
+                new = ctrl & 0xFB
+            self.i2c.writeto_mem(self.addr, CONTROL_REG, bytearray([new]))
 
+        # Return updated control register
         return self.i2c.readfrom_mem(self.addr, CONTROL_REG, 1)
 
     def check_alarm(self, alarm):
-        """Check if the alarm flag is set and clear the alarm flag"""
+        """Check and clear the status flag for Alarm 1 or Alarm 2.
+        
+        - alarm=1 or 2: mask value to test in STATUS_REG.
+        - Returns True if alarm flag was set (and clears it), False otherwise.
+        """
+        # Read status register into buffer
         self.i2c.readfrom_mem_into(self.addr, STATUS_REG, self._buf)
-        if (self._buf[0] & alarm) == 0:
-            # Alarm flag not set
-            return False
-
-        # Clear alarm flag bit
-        self.i2c.writeto_mem(self.addr, STATUS_REG, bytearray([self._buf[0] & ~alarm]))
+        status = self._buf[0]
+        if not (status & alarm):
+            return False  # no alarm pending
+        # Clear the alarm flag bit
+        self.i2c.writeto_mem(self.addr, STATUS_REG, bytearray([status & ~alarm]))
         return True
 
     def output_32kHz(self, enable=True):
-        """Enable or disable the 32.768 kHz square wave output"""
-        status = self.i2c.readfrom_mem(self.addr, STATUS_REG, 1)[0]
+        """Toggle the 32.768 kHz output on the SQW pin (STATUS_REG bit 3)."""
+        current = self.i2c.readfrom_mem(self.addr, STATUS_REG, 1)[0]
         if enable:
-            self.i2c.writeto_mem(self.addr, STATUS_REG, bytearray([status | (1 << 3)]))
+            new = current | (1 << 3)
         else:
-            self.i2c.writeto_mem(self.addr, STATUS_REG, bytearray([status & (~(1 << 3))]))
+            new = current & ~(1 << 3)
+        self.i2c.writeto_mem(self.addr, STATUS_REG, bytearray([new]))
 
     def OSF(self):
-        """Returns the oscillator stop flag (OSF).
-
-        1 indicates that the oscillator is stopped or was stopped for some
-        period in the past and may be used to judge the validity of
-        the time data.
-        returns : bool"""
-        return bool(self.i2c.readfrom_mem(self.addr, STATUS_REG, 1)[0] >> 7)
+        """Return the Oscillator Stop Flag (OSF, STATUS_REG bit 7).
+        
+        True if the timekeeping was halted (power loss) since last check.
+        """
+        return bool(self.i2c.readfrom_mem(self.addr, STATUS_REG, 1)[0] & 0x80)
 
     def _OSF_reset(self):
-        """Clear the oscillator stop flag (OSF)"""
+        """Clear the Oscillator Stop Flag (OSF) by writing 0 to STATUS_REG bit 7."""
         self.i2c.readfrom_mem_into(self.addr, STATUS_REG, self._buf)
-        self.i2c.writeto_mem(self.addr, STATUS_REG, bytearray([self._buf[0] & 0x7f]))
+        cleared = self._buf[0] & 0x7F
+        self.i2c.writeto_mem(self.addr, STATUS_REG, bytearray([cleared]))
 
     def _is_busy(self):
-        """Returns True when device is busy doing TCXO management"""
+        """Return True if the DS3231 is busy with TCXO frequency trimming (STATUS_REG bit 2)."""
         return bool(self.i2c.readfrom_mem(self.addr, STATUS_REG, 1)[0] & (1 << 2))
