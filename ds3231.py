@@ -160,6 +160,30 @@ class DS3231:
             # Return full tuple plus dummy subseconds (0) to match ESP8266 RTC API
             return (year, month, day, weekday, hour, minutes, seconds, 0)
 
+        # A new datetime tuple was provided by the user to set the RTC.
+        # Let's perform some basic validation:
+        if not isinstance(datetime, tuple) or len(datetime) < 1 or len(datetime) > 7:
+            raise ValueError("datetime must be a tuple with 1 to 7 elements: "
+                             "(year, month, day, hour, minute, second, weekday)")
+        year, month, day, hour, minute, second = (
+            datetime[0], datetime[1], datetime[2],
+            datetime[3], datetime[4],
+            datetime[5] if len(datetime) > 5 else 0
+        )
+        if not (2000 <= year <= 2099):
+            raise ValueError(f"Year {year} out of range (2000-2099)")
+        if not (1 <= month <= 12):
+            raise ValueError(f"Month {month} out of range (1-12)")
+        if not (1 <= day <= 31):
+            raise ValueError(f"Day {day} out of range (1-31)")
+        if not (0 <= hour < 24):
+            raise ValueError(f"Hour {hour} out of range (0-23)")
+        if not (0 <= minute < 60):
+            raise ValueError(f"Minute {minute} out of range (0-59)")
+        if not (0 <= second < 60):
+            raise ValueError(f"Second {second} out of range (0-59)")
+        
+        # Validation passed, now prepare to set the new date/time.
         # ----------------------------
         # Set new date/time on chip
         # ----------------------------
