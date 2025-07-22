@@ -1,6 +1,8 @@
 # ds3231_with_eeprom.py
 MicroPython driver for DS3231 RTC and AT24C32 EEPROM circuitboard.
 
+Authored by Conrad Storz as a vibe coding project. July 22, 2025
+
 This is an effort to expand on the work of Willem Peterse and his project to access the DS3231.
 
 I am adding EEPROM access and access to the temperature sensor on the circuitboard.
@@ -22,7 +24,7 @@ I am adding EEPROM access and access to the temperature sensor on the circuitboa
 # Note: Ensure that the I2C bus is properly initialized and the DS3231 circuitboard is connected correctly.
 # The EEPROM operations are blocking, so they may take some time depending on the I2C speed and the EEPROM's write cycle time.
 # The temperature reading is in Celsius and can be used for various applications like logging or triggering events
-# based on temperature thresholds.  
+# based on temperature thresholds. Another choice would be as a time and temperature display device.  
 
 The following is copied from Willem Peterse original project for your reference.
 
