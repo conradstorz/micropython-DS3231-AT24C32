@@ -7,7 +7,7 @@
 # The driver provides methods to read and write EEPROM data. I will also add access to the temperature sensor.
 # I am releasing this under the MIT license, to honor the work of Willem Peterse.
 
-import ds3231
+import ds3231_original_version
 
 # The MIT License (MIT)
 #
@@ -32,6 +32,7 @@ import ds3231
 # THE SOFTWARE.
 
 import time
+
 #from machine import I2C  # Not needed here. User will provide their own I2C instance. 
 #from machine import Pin  # Also does not need to be imported here for same reason.
 
@@ -41,13 +42,9 @@ class DS3231Error(Exception):
     pass    
 
 
-# DS3231 with EEPROM support
-import ds3231
-import time
-
 # Extend the DS3231 RTC driver to include AT24C32 EEPROM support
-class DS3231_With_EEPROM(ds3231.DS3231):
-    def __init__(self, i2c, address=ds3231.DS3231_I2C_ADDRESS):
+class DS3231_With_EEPROM(ds3231_original_version.DS3231):
+    def __init__(self, i2c, address=ds3231_original_version.DS3231_I2C_ADDRESS):
         """
         Initialize the DS3231 RTC driver and configure the EEPROM I2C address.
 
@@ -112,7 +109,7 @@ class DS3231_With_EEPROM(ds3231.DS3231):
         """
         # Read two bytes from the temperature register
         temp_bytes = self.i2c.readfrom_mem(
-            self.address, ds3231.DS3231_TEMP_REG, 2
+            self.address, ds3231_original_version.DS3231_TEMP_REG, 2
         )
 
         # Combine bytes into a single signed 16-bit integer
