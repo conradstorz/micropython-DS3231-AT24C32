@@ -46,7 +46,7 @@ import ds3231
 import time
 
 # Extend the DS3231 RTC driver to include AT24C32 EEPROM support
-class DS3231WithEEPROM(ds3231.DS3231):
+class DS3231_With_EEPROM(ds3231.DS3231):
     def __init__(self, i2c, address=ds3231.DS3231_I2C_ADDRESS):
         """
         Initialize the DS3231 RTC driver and configure the EEPROM I2C address.
@@ -126,19 +126,19 @@ class DS3231WithEEPROM(ds3231.DS3231):
         return celsius
 
 
-# Example usage of the DS3231WithEEPROM class
+# Example usage of the DS3231_With_EEPROM class
 # Uncomment the following lines to test the functionality with a real I2C bus
 # from machine import I2C, Pin
 # i2c = I2C(0, scl=Pin(22), sda=Pin(21))  # Adjust pins as needed
-# rtc = DS3231WithEEPROM(i2c)  # Create an instance of the RTC with EEPROM support  
+# ds = DS3231_With_EEPROM(i2c)  # Create an instance of the RTC with EEPROM support  
     
 # Example usage:
          
-# rtc.write_eeprom(0, b'Hello')            # Write 'Hello' to EEPROM at address 0 Valid addresses are 0-1023
-# data = rtc.read_eeprom(0, 5)             # Read 5 bytes from EEPROM starting at address 0
-# print(data)                              # Should print b'Hello', 'b' is a bytes object in Python 
-# temp = rtc.read_temperature()            # Read temperature
-# print("Temperature:", temp, "C")         # Print temperature in Celsius
+# ds.write_eeprom(0, b'Hello')            # Write 'Hello' to EEPROM at address 0 Valid addresses are 0-1023
+# data = ds.read_eeprom(0, 5)             # Read 5 bytes from EEPROM starting at address 0
+# print(data)                             # Should print b'Hello', 'b' is a bytes object in Python 
+# temp = ds.read_temperature()            # Read temperature
+# print("Temperature:", temp, "C")        # Print temperature in Celsius
 
 # Note: Ensure that the I2C bus is properly initialized and the DS3231 circuitboard is connected correctly.
 # The EEPROM operations are blocking, so they may take some time depending on the I2C speed and the EEPROM's write cycle time.
